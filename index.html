@@ -68,7 +68,10 @@ a{color:inherit}
 .track{position:relative;background:#fff;height:400vh}
 .scene{position:sticky;top:0;height:100vh;height:100lvh;overflow:hidden;
   background:linear-gradient(to bottom,#fff 0,#fff var(--edge-px),#111 var(--edge-px),#111 100%)}
-.scene video{position:absolute;left:0;top:0;width:1920px;height:1080px;display:block;pointer-events:none}
+.scene video,.scene canvas{position:absolute;left:0;top:0;width:1920px;height:1080px;display:block;pointer-events:none;will-change:transform}
+.scene video{display:none}
+.scene.use-video video{display:block}
+.scene.use-video canvas{display:none}
 .clip-note{position:absolute;left:50%;top:22%;transform:translateX(-50%);display:none;max-width:420px;text-align:center;
   font-size:13px;line-height:1.5;color:#555;border:1px dashed #bbb;border-radius:12px;padding:14px 18px;background:#fff;z-index:2}
 .scene.no-clip .clip-note{display:block}
@@ -308,7 +311,8 @@ body.menu-open .wa-fab,body.menu-open .wa-pop{display:none}
 
 <div class="track" id="top">
   <div class="scene" id="scene">
-    <video id="clip" muted playsinline preload="auto" aria-hidden="true" tabindex="-1"></video>
+    <canvas id="clipc" aria-hidden="true"></canvas>
+    <video id="clip" muted playsinline preload="none" aria-hidden="true" tabindex="-1"></video>
     <p class="clip-note">The truck-loading clip couldn't load. Check that the media files are uploaded next to this page.</p>
 
     <div class="intro" id="intro">
@@ -555,12 +559,63 @@ var CONFIG = {
   var nav = document.getElementById('nav');
   var cards = Array.prototype.slice.call(strip.querySelectorAll('.card'));
 
+  var lastW = 0, lastH = 0;
   var vw = 0, vh = 0, A = A_DESK, B = 1, stripW = 0, giantW = 0, phone = false;
   var duration = 4.04, cur = 0, target = 0, settled = false, introOff = false;
   var lastY = window.scrollY, lastT = performance.now(), speed = 0, navY = window.scrollY;
   var rec = /(?:^|[?&])rec=1(?:&|$)/.test(location.search), recProgress = 0, recSpeed = 0;
 
-  /* ---- video: load into memory (blob:) first, then direct src ---- */
+  /* ---- clip: every frame of the clip as an image, drawn on a canvas.
+     Scrubbing an image sequence is instant, so the animation follows the scroll
+     smoothly on every device. The video file is only a fallback. ---- */
+  var FRAMES = 97, FPS = 24;
+  var canvas = document.getElementById('clipc'), ctx = canvas.getContext('2d');
+  var smallScreen = Math.min(window.innerWidth, (window.screen && screen.width) || 9999) <= 900 || window.innerWidth <= window.innerHeight;
+  var frameDir = smallScreen ? 'media/f/m/' : 'media/f/d/';
+  var imgs = new Array(FRAMES), drawn = -1, failures = 0, useVideo = false, frameW = smallScreen ? 1280 : 1600;
+  duration = FRAMES / FPS;
+  function frameUrl(i){ return frameDir + ('00' + (i + 1)).slice(-3) + '.webp'; }
+  function loadFrame(i){
+    return new Promise(function(res){
+      var im = new Image();
+      im.decoding = 'async';
+      im.onload = function(){
+        var done = function(){ imgs[i] = im; if (drawn < 0 || i === Math.round(cur * FPS)) drawn = -1; res(true); };
+        if (im.decode) im.decode().then(done, done); else done();
+      };
+      im.onerror = function(){ failures++; res(false); };
+      im.src = frameUrl(i);
+    });
+  }
+  // first frame, then coarse-to-fine so scrubbing works while the rest arrive
+  var order = [], seen = {};
+  [96, 8, 4, 2, 1].forEach(function(step){ for (var i = 0; i < FRAMES; i += step){ if (!seen[i]){ seen[i] = 1; order.push(i); } } });
+  if (!seen[FRAMES - 1]) order.push(FRAMES - 1);
+  (function pump(){
+    var active = 0, k = 0;
+    function next(){
+      while (!useVideo && active < 6 && k < order.length){
+        var i = order[k++]; active++;
+        loadFrame(i).then(function(){ active--; if (failures >= 3 && !useVideo) startVideo(); else next(); });
+      }
+    }
+    next();
+  })();
+  function nearestLoaded(i){
+    for (var d = 0; d < FRAMES; d++){
+      if (i - d >= 0 && imgs[i - d]) return i - d;
+      if (i + d < FRAMES && imgs[i + d]) return i + d;
+    }
+    return -1;
+  }
+  function drawFrame(i){
+    var j = nearestLoaded(clamp(i, 0, FRAMES - 1));
+    if (j < 0 || j === drawn) return;
+    ctx.drawImage(imgs[j], 0, 0, canvas.width, canvas.height);
+    drawn = j;
+  }
+
+  /* fallback: the video file, loaded into memory (blob:) first, then direct src */
   function asBlobUrl(url){
     return fetch(url).then(function(r){
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -577,18 +632,17 @@ var CONFIG = {
     if (direct){ video.src = url; video.load(); return; }
     asBlobUrl(url).then(function(b){ video.src = b; video.load(); }, tryNext);
   }
-  video.addEventListener('error', tryNext);
-  video.addEventListener('loadedmetadata', function(){
-    if (isFinite(video.duration) && video.duration > 0) duration = video.duration;
-    video.pause(); scene.classList.remove('no-clip');
-  });
-  video.addEventListener('loadeddata', function(){ try { video.currentTime = Math.max(cur, 0.001); } catch(e){} });
-  video.addEventListener('seeked', seekStep);
-  (function setPoster(i){
-    if (i >= SRC.poster.length) return;
-    asBlobUrl(SRC.poster[i]).then(function(b){ if (video.readyState < 2) video.poster = b; }, function(){ setPoster(i + 1); });
-  })(0);
-  tryNext();
+  function startVideo(){
+    useVideo = true; scene.classList.add('use-video'); video.preload = 'auto';
+    video.addEventListener('error', tryNext);
+    video.addEventListener('loadedmetadata', function(){
+      if (isFinite(video.duration) && video.duration > 0) duration = video.duration;
+      video.pause(); scene.classList.remove('no-clip');
+    });
+    video.addEventListener('loadeddata', function(){ try { video.currentTime = Math.max(cur, 0.001); } catch(e){} });
+    video.addEventListener('seeked', seekStep);
+    tryNext();
+  }
 
   /* ---- layout ---- */
   function layout(){
@@ -608,8 +662,14 @@ var CONFIG = {
       left = vw/2 - 0.40*W;
       top = Math.max(0.33*vh, 236);
     }
-    video.style.width = W + 'px'; video.style.height = H + 'px';
-    video.style.transform = 'translate(' + left + 'px,' + top + 'px)';
+    [video, canvas].forEach(function(el){
+      el.style.width = W + 'px'; el.style.height = H + 'px';
+      el.style.transform = 'translate3d(' + left + 'px,' + top + 'px,0)';
+    });
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var cw = Math.round(Math.min(W * dpr, frameW)), ch = Math.round(cw * FH / FW);
+    if (canvas.width !== cw || canvas.height !== ch){ canvas.width = cw; canvas.height = ch; drawn = -1; }
+    lastW = vw; lastH = window.innerHeight;
     scene.style.setProperty('--edge-px', (top + EDGE_FINAL*H) + 'px');
     scene.style.setProperty('--ground0-px', (top + EDGE_START*H) + 'px');
 
@@ -620,6 +680,7 @@ var CONFIG = {
 
   function clamp(x, a, b){ return Math.min(b, Math.max(a, x)); }
   function seekStep(){
+    if (!useVideo){ drawFrame(Math.round(cur * FPS)); return; }
     if (!video.readyState || video.seeking) return;
     if (Math.abs(video.currentTime - cur) > 1/60){ try { video.currentTime = cur; } catch(e){} }
   }
@@ -643,6 +704,7 @@ var CONFIG = {
     var q = clamp(y / (A*vh), 0, 1);
     target = q * (duration - 1/48);
     cur += (target - cur) * 0.2;
+    if (Math.abs(target - cur) < 0.002) cur = target;
     seekStep();
 
     var nowSettled = q >= 0.94;
@@ -808,7 +870,14 @@ var CONFIG = {
   });
   qform.addEventListener('input', function(e){ if (e.target.value.trim()) e.target.removeAttribute('aria-invalid'); });
 
-  window.addEventListener('resize', layout);
+  // Phone browsers change the window height as the address bar hides and shows.
+  // Ignore those small height-only changes so the animation doesn't jump mid-scroll.
+  window.addEventListener('resize', function(){
+    var w = root.clientWidth || window.innerWidth, h = window.innerHeight;
+    var touch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+    if (touch && w === lastW && Math.abs(h - lastH) < 160) return;
+    layout();
+  });
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
   layout();
   requestAnimationFrame(function(t){ lastT = t; frame(t); });

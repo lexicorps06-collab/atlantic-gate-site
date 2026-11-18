@@ -8,9 +8,11 @@ A single-page, scroll-driven website for an import/export logistics company. It'
 
 ```
 index.html          the whole site (styles and script included)
-media/kv-1080.mp4   scroll animation, desktop (1920×1080, 97 frames)
-media/kv-720.mp4    scroll animation, screens 900px wide and below
-media/kv-poster.jpg first frame, shown while the clip loads
+media/f/d/001–097.webp  scroll animation frames, desktop (1600×900)
+media/f/m/001–097.webp  scroll animation frames, phones and tablets (1280×720)
+media/kv-1080.mp4       fallback video, used only if the frames can't load
+media/kv-720.mp4        fallback video for small screens
+media/kv-poster.jpg     first frame
 vercel.json         caching headers for the media files
 ```
 
@@ -30,7 +32,7 @@ var CONFIG = {
 
 ## Run locally
 
-The video loads with `fetch()`, so open the site through a local server rather than by double-clicking the file:
+The page loads its media with `fetch()`, so open the site through a local server rather than by double-clicking the file:
 
 ```bash
 npx serve .            # or: python3 -m http.server 8000
